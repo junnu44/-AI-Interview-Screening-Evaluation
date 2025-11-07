@@ -34,6 +34,8 @@ h1, h2, h3 { letter-spacing: 0.2px; }
 .btn-row .stButton>button { border-radius:10px; padding:10px 14px; font-weight:700; }
 .small-note { color:#64748b; font-size:0.85rem; }
 hr { border: none; height: 1px; background: #e2e8f0; margin: 10px 0 16px; }
+.sidebar-card { background:#0b1220; color:#e5e7eb; padding:14px; border-radius:12px; border:1px solid #1f2937; }
+.sidebar-card h4 { margin: 0 0 8px 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -54,19 +56,20 @@ defaults = {
     "experience": "",
     "started": False,
     "admin_ok": False,
-    "section": "candidate",
-    "_switch_js": False
+    "section": "candidate",      # 'candidate' | 'interview'
+    "_switch_js": False          # trigger JS tab switch once
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 def go(section_name: str):
+    """Lightweight navigator + trigger a one-time JS tab click."""
     st.session_state.section = section_name
     st.session_state._switch_js = True
 
 # -----------------------------------------------------------
-# Helper: TTS
+# Helper: TTS (browser native)
 # -----------------------------------------------------------
 def tts(text: str):
     if not text:
@@ -84,7 +87,7 @@ def tts(text: str):
     )
 
 # -----------------------------------------------------------
-# Helper: auto-click the Interview tab (JS)
+# Helper: auto-click a tab (JS) — 0=candidate, 1=interview
 # -----------------------------------------------------------
 def click_tab(index_zero_based: int):
     st.components.v1.html(
@@ -105,20 +108,65 @@ def click_tab(index_zero_based: int):
     )
 
 # -----------------------------------------------------------
-# PAGE TITLE + NAV TABS
+# SIDEBAR — ADMIN PANEL (no tab)
+# -----------------------------------------------------------
+with st.sidebar:
+    st.markdown("<div class='sidebar-card'><h4>🔐 Admin</h4>", unsafe_allow_html=True)
+    if not st.session_state.admin_ok:
+        u = st.text_input("Username", key="admin_user")
+        p = st.text_input("Password", type="password", key="admin_pass")
+        if st.button("Login", use_container_width=True):
+            if u == Config.ADMIN_USER and p == Config.ADMIN_PASS:
+                st.session_state.admin_ok = True
+                st.success("Logged in")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+    else:
+        st.success("Logged in")
+        rows = list_candidates(Config.DATABASE)
+        if rows:
+            df = pd.DataFrame(rows, columns=[
+                "cand_id","name","email","role","interview_id","started_at","status","overall_score"
+            ])
+            st.dataframe(df, use_container_width=True, height=240)
+            if df["overall_score"].notna().sum() > 0:
+                st.caption("Scores")
+                st.bar_chart(df.set_index("name")["overall_score"])
+            sel = st.number_input("Open candidate id", min_value=1, step=1, key="admin_sel_id")
+            if st.button("Open details", use_container_width=True):
+                cand, responses = get_candidate_details(int(sel), Config.DATABASE)
+                if not cand:
+                    st.warning("Candidate not found")
+                else:
+                    st.write("**Candidate**")
+                    st.write({
+                        "id": cand[0], "full_name": cand[1], "email": cand[2],
+                        "role": cand[3], "experience": cand[4], "hobbies": cand[5],
+                        "resume_name": cand[6], "created_at": cand[7]
+                    })
+                    st.write("**Responses**")
+                    if responses:
+                        rdf = pd.DataFrame(responses, columns=[
+                            "Q#", "Category", "Question", "Answer", "Score", "Feedback", "Created At"
+                        ])
+                        st.dataframe(rdf, use_container_width=True, height=260)
+                    else:
+                        st.info("No responses yet.")
+        else:
+            st.info("No candidates yet.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# -----------------------------------------------------------
+# PAGE TITLE + NAV TABS (ONLY TWO TABS NOW)
 # -----------------------------------------------------------
 st.title("🤖 AI Interview Screening & Evaluation")
+tabs = st.tabs(["🧑 Candidate", "🎤 Interview"])
 
-tabs = st.tabs(["🧑 Candidate", "🎤 Interview", "📊 Admin"])
-
+# If we marked a switch, perform it now (0=candidate,1=interview)
 if st.session_state._switch_js:
     st.session_state._switch_js = False
-    if st.session_state.section == "interview":
-        click_tab(1)
-    elif st.session_state.section == "admin":
-        click_tab(2)
-    else:
-        click_tab(0)
+    click_tab(1 if st.session_state.section == "interview" else 0)
 
 # -----------------------------------------------------------
 # TAB 1 — Candidate
@@ -144,14 +192,20 @@ with tabs[0]:
     if submitted:
         resume_name = resume.name if resume else None
 
-        cid = save_candidate(full_name, email, role, experience, hobbies, resume_name, Config.DATABASE)
+        # Persist candidate + create interview
+        cid = save_candidate(
+            full_name, email, role, experience, hobbies,
+            resume_name, Config.DATABASE
+        )
         iid = create_interview(cid, Config.DATABASE)
 
+        # Keep session
         st.session_state.candidate_id = cid
         st.session_state.interview_id = iid
         st.session_state.role = role or "General"
         st.session_state.experience = experience or "0"
 
+        # Fetch questions (AI or fallback) and limit to 20
         qs = generate_questions_for_role(st.session_state.role, st.session_state.experience)
         st.session_state.questions = qs[:20] if isinstance(qs, list) else []
         st.session_state.q_index = 0
@@ -159,7 +213,7 @@ with tabs[0]:
 
         st.success("✅ Interview created! Taking you to the Interview…")
         go("interview")
-        st.rerun()   # ✅ NEW
+        st.rerun()
 
 # -----------------------------------------------------------
 # TAB 2 — Interview
@@ -170,7 +224,7 @@ with tabs[1]:
     if not st.session_state.started or not st.session_state.interview_id:
         st.info("Please fill candidate details in the **Candidate** tab first.")
     else:
-
+        # Header chips
         st.markdown(
             f"<span class='badge badge-role'>{st.session_state.role or 'General'}</span>"
             f"<span class='badge badge-exp'>Exp: {st.session_state.experience or '0'} yrs</span>",
@@ -181,22 +235,23 @@ with tabs[1]:
         questions = st.session_state.questions
         total_qs = len(questions)
 
+        # Progress
         pct = 0.0 if total_qs == 0 else q_idx / max(1, total_qs)
         st.progress(pct, text=f"{q_idx}/{total_qs} answered")
 
+        # Finished?
         if q_idx >= total_qs or q_idx >= 20:
             avg = finalize_interview(st.session_state.interview_id, Config.DATABASE)
             st.success("✅ Interview completed!")
-
             st.markdown(
                 f"<div class='score-box'><h2>Final Score: {avg:.1f} / 100</h2>"
-                f"<div class='small-note'>You can review answers in the Admin tab.</div></div>",
+                f"<div class='small-note'>You can review answers from the Admin panel in the sidebar.</div></div>",
                 unsafe_allow_html=True
             )
-
         else:
-            q = questions[q_idx]
+            q = questions[q_idx] if total_qs else {"category":"", "question":"(No questions loaded)"}
 
+            # Category + Question
             st.markdown(
                 f"<span class='badge badge-cat'>{q.get('category','General')}</span>",
                 unsafe_allow_html=True
@@ -206,8 +261,10 @@ with tabs[1]:
                 unsafe_allow_html=True
             )
 
+            # Auto TTS
             tts(q.get("question", ""))
 
+            # Answer controls
             st.caption("Answer by voice or type below.")
             wav_audio = mic_recorder(
                 start_prompt="🎤 Start Recording",
@@ -219,6 +276,7 @@ with tabs[1]:
 
             colA, colB, colC = st.columns([1, 1, 1])
 
+            # Skip
             with colA:
                 if st.button("⏭ Skip", use_container_width=True):
                     save_response(
@@ -227,12 +285,14 @@ with tabs[1]:
                     )
                     st.session_state.q_index += 1
                     go("interview")
-                    st.rerun()   # ✅ NEW
+                    st.rerun()
 
+            # Submit
             with colB:
                 if st.button("✅ Submit", use_container_width=True):
                     final_text = (transcript or "").strip()
 
+                    # If user recorded audio and left text empty → transcribe
                     if not final_text and wav_audio and "bytes" in wav_audio:
                         try:
                             final_text = transcribe_audio_wav(wav_audio["bytes"])
@@ -242,6 +302,7 @@ with tabs[1]:
                     if not final_text:
                         st.warning("No answer detected. Please speak or type.")
                     else:
+                        # Evaluate
                         ai_eval = evaluate_answer_ai(
                             q.get("question", ""),
                             final_text,
@@ -250,6 +311,7 @@ with tabs[1]:
                             st.session_state.experience
                         )
 
+                        # Store response
                         save_response(
                             st.session_state.interview_id, q_idx + 1, q.get("category"),
                             q.get("question"), final_text,
@@ -257,6 +319,7 @@ with tabs[1]:
                             Config.DATABASE
                         )
 
+                        # Adaptive follow-up
                         try:
                             nxt = generate_adaptive_question(
                                 q.get("question",""), final_text, q.get("category",""),
@@ -267,70 +330,14 @@ with tabs[1]:
                                     q_idx + 1, {"category": q.get("category",""), "question": nxt}
                                 )
                                 st.session_state.questions = st.session_state.questions[:20]
-                        except:
+                        except Exception:
                             pass
 
                         st.session_state.q_index += 1
                         go("interview")
-                        st.rerun()   # ✅ NEW
+                        st.rerun()
 
+            # Repeat Question
             with colC:
                 if st.button("🔊 Repeat Q", use_container_width=True):
                     tts(q.get("question",""))
-
-# -----------------------------------------------------------
-# TAB 3 — Admin
-# -----------------------------------------------------------
-with tabs[2]:
-    st.subheader("Admin Dashboard")
-
-    if not st.session_state.admin_ok:
-        with st.form("admin_login"):
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password")
-            ok = st.form_submit_button("Login")
-        if ok:
-            if u == Config.ADMIN_USER and p == Config.ADMIN_PASS:
-                st.session_state.admin_ok = True
-                st.success("✅ Logged in")
-                go("admin")
-                st.rerun()   # ✅ NEW
-            else:
-                st.error("Invalid credentials")
-    else:
-        rows = list_candidates(Config.DATABASE)
-        if not rows:
-            st.info("No candidates yet.")
-        else:
-            df = pd.DataFrame(rows, columns=[
-                "cand_id","name","email","role","interview_id","started_at","status","overall_score"
-            ])
-            st.dataframe(df, use_container_width=True, height=320)
-
-            if df["overall_score"].notna().sum() > 0:
-                st.markdown("#### Scores")
-                st.bar_chart(df.set_index("name")["overall_score"])
-
-            c1, _ = st.columns([1, 3])
-            sel = c1.number_input("Candidate ID to open:", min_value=1, step=1)
-            open_btn = c1.button("Open details", use_container_width=True)
-
-            if open_btn:
-                cand, responses = get_candidate_details(int(sel), Config.DATABASE)
-                if not cand:
-                    st.warning("Candidate not found")
-                else:
-                    with st.expander("👤 Candidate Info", expanded=True):
-                        st.write({
-                            "id": cand[0], "full_name": cand[1], "email": cand[2],
-                            "role": cand[3], "experience": cand[4], "hobbies": cand[5],
-                            "resume_name": cand[6], "created_at": cand[7]
-                        })
-                    with st.expander("🗒️ Responses", expanded=True):
-                        if responses:
-                            rdf = pd.DataFrame(responses, columns=[
-                                "Q#", "Category", "Question", "Answer", "Score", "Feedback", "Created At"
-                            ])
-                            st.dataframe(rdf, use_container_width=True)
-                        else:
-                            st.info("No responses yet.")
